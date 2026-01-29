@@ -387,15 +387,28 @@ export default function App() {
         const { key, existingUser, existingId } = completeRows[i];
         setVerifyProgress({ current: i + 1, total: completeRows.length });
 
-        const keyUpper = key.toUpperCase();
+        // Extraer solo dígitos y pad a 4 dígitos
+        const resNum = key.replace(/[^\d]/g, "");
+        const paddedNum = resNum.padStart(4, "0");
+        const searchKey = `RS-${paddedNum}`;
+        const pdfNames = Object.keys(pdfIndex);
 
         // Buscar PDF
         let matchedFile: File | null = null;
-        if (pdfIndex[keyUpper]) {
-          matchedFile = pdfIndex[keyUpper];
-        } else {
-          for (const pdfName of Object.keys(pdfIndex)) {
-            if (pdfName.includes(keyUpper) || keyUpper.includes(pdfName)) {
+
+        // 1. Buscar por prefijo RS-XXXX-
+        for (const pdfName of pdfNames) {
+          if (pdfName.startsWith(searchKey + "-") || pdfName === searchKey) {
+            matchedFile = pdfIndex[pdfName];
+            break;
+          }
+        }
+
+        // 2. Fallback sin padding
+        if (!matchedFile) {
+          const keyUpper = `RS-${resNum}`.toUpperCase();
+          for (const pdfName of pdfNames) {
+            if (pdfName.startsWith(keyUpper + "-") || pdfName === keyUpper) {
               matchedFile = pdfIndex[pdfName];
               break;
             }
@@ -404,7 +417,7 @@ export default function App() {
 
         if (!matchedFile) {
           notFound++;
-          pushVerifyLog(`Sin PDF: ${key}`, "warning", {
+          pushVerifyLog(`Sin PDF: ${key} (buscado: ${searchKey})`, "warning", {
             reason: "No se encontró el archivo PDF para verificar.",
           });
           continue;
@@ -566,18 +579,28 @@ export default function App() {
         const { row, key } = rowsToProcess[i];
         setProgress({ current: i + 1, total: rowsToProcess.length });
 
-        const keyUpper = key.toUpperCase();
+        // Extraer solo dígitos del número de resolución
+        const resNum = key.replace(/[^\d]/g, "");
+        // Pad a 4 dígitos (ej: "97" -> "0097", "1234" -> "1234")
+        const paddedNum = resNum.padStart(4, "0");
+        const searchKey = `RS-${paddedNum}`;
 
         // Buscar PDF correspondiente (SOLO en archivos RS-)
         let matchedFile: File | null = null;
 
-        // 1. Coincidencia exacta
-        if (pdfIndex[keyUpper]) {
-          matchedFile = pdfIndex[keyUpper];
-        } else {
-          // 2. Búsqueda parcial solo en archivos RS-
+        // 1. Buscar por prefijo RS-XXXX (ej: RS-0097-)
+        for (const pdfName of rsNames) {
+          if (pdfName.startsWith(searchKey + "-") || pdfName === searchKey) {
+            matchedFile = pdfIndex[pdfName];
+            break;
+          }
+        }
+
+        // 2. Fallback: buscar sin padding por compatibilidad
+        if (!matchedFile) {
+          const keyUpper = `RS-${resNum}`.toUpperCase();
           for (const pdfName of rsNames) {
-            if (pdfName.includes(keyUpper) || keyUpper.includes(pdfName)) {
+            if (pdfName.startsWith(keyUpper + "-") || pdfName === keyUpper) {
               matchedFile = pdfIndex[pdfName];
               break;
             }
@@ -592,16 +615,16 @@ export default function App() {
 
           // Buscar nombres similares para ayudar al debug
           const similarFiles = rsNames.filter((name) => {
-            const keyPart = keyUpper.slice(0, Math.min(15, keyUpper.length));
             return (
-              name.includes(keyPart) || keyPart.includes(name.slice(0, 15))
+              name.includes(paddedNum) ||
+              name.includes(resNum) ||
+              name.startsWith(searchKey)
             );
           });
 
-          pushLog(`Sin PDF: ${key}`, "warning", {
-            searchedFor: key,
-            reason:
-              "No se encontró ningún archivo RS- que coincida con esta resolución.",
+          pushLog(`Sin PDF: ${key} (buscado: ${searchKey})`, "warning", {
+            searchedFor: searchKey,
+            reason: `No se encontró archivo ${searchKey}-*.pdf`,
             availableFiles:
               similarFiles.length > 0 ? similarFiles : rsNames.slice(0, 10),
           });
@@ -609,7 +632,7 @@ export default function App() {
           allReports.push({
             type: "NO_FILE",
             resolution: key,
-            reason: "No se encontró archivo PDF correspondiente",
+            reason: `No se encontró archivo ${searchKey}-*.pdf`,
           });
           continue;
         }
@@ -1133,7 +1156,7 @@ export default function App() {
         <div className="app-header-top">
           <h1 className="app-title">Resoluciones</h1>
           <a
-            href="https://github.com/TU_USUARIO/fast-resoluciones#readme"
+            href="https://github.com/Max-Bustamante69/fast-resoluciones#readme"
             target="_blank"
             rel="noopener noreferrer"
             className="btn-help"

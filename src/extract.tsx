@@ -197,13 +197,21 @@ export function extractUserId(text: string): ExtractionResult {
 
   const norm = normalizeText(text);
 
-  // Estrategia 1: Patrón completo SENORES (plural)
+  // Detectar si hay patrón plural "SENORES" (requiere revisión manual)
+  const hasSenoresPlural = /\bSENORES\b/i.test(norm);
+
+  // Estrategia 1: Patrón completo SENORES (plural) - SIEMPRE marcar para revisión
   let match = norm.match(PATTERN_PLURAL);
   if (match?.[1] && match[2]) {
     const name = cleanName(match[1]);
     const id = cleanId(match[2]);
     if (isValidName(name) && isValidId(id)) {
-      return { Usuario: name, Identificacion: id, confidence: "high" };
+      return {
+        Usuario: name,
+        Identificacion: id,
+        confidence: "medium",
+        needsReview: true, // Plural siempre requiere revisión
+      };
     }
   }
 
@@ -213,7 +221,12 @@ export function extractUserId(text: string): ExtractionResult {
     const name = cleanName(match[1]);
     const id = cleanId(match[2]);
     if (isValidName(name) && isValidId(id)) {
-      return { Usuario: name, Identificacion: id, confidence: "high" };
+      return {
+        Usuario: name,
+        Identificacion: id,
+        confidence: hasSenoresPlural ? "medium" : "high",
+        needsReview: hasSenoresPlural || undefined,
+      };
     }
   }
 
@@ -223,7 +236,12 @@ export function extractUserId(text: string): ExtractionResult {
     const name = cleanName(match[1]);
     const id = cleanId(match[2]);
     if (isValidName(name) && isValidId(id)) {
-      return { Usuario: name, Identificacion: id, confidence: "high" };
+      return {
+        Usuario: name,
+        Identificacion: id,
+        confidence: hasSenoresPlural ? "medium" : "high",
+        needsReview: hasSenoresPlural || undefined,
+      };
     }
   }
 
@@ -233,7 +251,12 @@ export function extractUserId(text: string): ExtractionResult {
     const name = cleanName(match[1]);
     const id = cleanId(match[2]);
     if (isValidName(name) && isValidId(id)) {
-      return { Usuario: name, Identificacion: id, confidence: "medium" };
+      return {
+        Usuario: name,
+        Identificacion: id,
+        confidence: "medium",
+        needsReview: hasSenoresPlural || undefined,
+      };
     }
   }
 
@@ -243,7 +266,12 @@ export function extractUserId(text: string): ExtractionResult {
     const name = cleanName(match[1]);
     const id = cleanId(match[2]);
     if (isValidName(name) && isValidId(id)) {
-      return { Usuario: name, Identificacion: id, confidence: "medium" };
+      return {
+        Usuario: name,
+        Identificacion: id,
+        confidence: "medium",
+        needsReview: hasSenoresPlural || undefined,
+      };
     }
   }
 
@@ -291,6 +319,7 @@ export function extractUserId(text: string): ExtractionResult {
       Usuario: foundName,
       Identificacion: foundId,
       confidence: "medium",
+      needsReview: hasSenoresPlural || undefined,
     };
   }
 

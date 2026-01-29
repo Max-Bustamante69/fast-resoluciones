@@ -51,16 +51,26 @@ Tu archivo Excel debe tener las siguientes columnas:
 Los archivos PDF deben seguir el formato de nombre:
 
 ```
-RS-[NÚMERO]-[DÍA]-[MES]-[AÑO].pdf
+RS-[NÚMERO 4 DÍGITOS]-[DÍA]-[MES]-[AÑO].pdf
 ```
 
-**Ejemplos válidos:**
+**El número siempre debe tener 4 dígitos** (con ceros a la izquierda si es necesario):
 
-- `RS-3588-23-JULIO-2025.pdf`
-- `RS-176-01-ENERO-2025.pdf`
-- `RS-4293-08-SEPTIEMBRE-2025.pdf`
+| Excel tiene | PDF debe llamarse           |
+| ----------- | --------------------------- |
+| 97          | `RS-0097-23-JULIO-2025.pdf` |
+| 176         | `RS-0176-01-ENERO-2025.pdf` |
+| 1234        | `RS-1234-15-MARZO-2025.pdf` |
+| 3588        | `RS-3588-23-JULIO-2025.pdf` |
 
-> **Importante**: Solo se procesan archivos que comiencen con `RS-`. Otros archivos serán ignorados.
+**Ejemplos:**
+
+- `RS-0097-23-JULIO-2025.pdf` ← para resolución 97
+- `RS-0176-01-ENERO-2025.pdf` ← para resolución 176
+- `RS-3588-23-JULIO-2025.pdf` ← para resolución 3588
+- `RS-4293-08-SEPTIEMBRE-2025.pdf` ← para resolución 4293
+
+> **Importante**: Solo se procesan archivos que comiencen con `RS-`. El sistema busca automáticamente con el número paddeado a 4 dígitos.
 
 #### Paso 3: Cargar archivos
 
@@ -163,8 +173,11 @@ El archivo `reporte_resoluciones.txt` incluye:
 ### "No se encontró archivo PDF"
 
 - Verifica que el nombre del PDF comience con `RS-`
-- Verifica que el número de resolución coincida
-- Ejemplo: Resolución `3588` busca archivos como `RS-3588-*.pdf`
+- **El número debe tener 4 dígitos** con ceros a la izquierda
+- Ejemplos de búsqueda:
+  - Resolución `97` → busca `RS-0097-*.pdf`
+  - Resolución `176` → busca `RS-0176-*.pdf`
+  - Resolución `3588` → busca `RS-3588-*.pdf`
 
 ### "No se encontró señor/a ni cédula"
 
