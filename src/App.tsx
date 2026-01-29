@@ -1130,7 +1130,18 @@ export default function App() {
   return (
     <div className="app-container">
       <header className="app-header">
-        <h1 className="app-title">Resoluciones</h1>
+        <div className="app-header-top">
+          <h1 className="app-title">Resoluciones</h1>
+          <a
+            href="https://github.com/TU_USUARIO/fast-resoluciones#readme"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn-help"
+            title="Ver guía de uso"
+          >
+            ? Ayuda
+          </a>
+        </div>
         <p className="app-subtitle">
           Extrae datos de PDFs y completa tu Excel automáticamente
         </p>
