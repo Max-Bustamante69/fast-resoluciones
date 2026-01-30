@@ -29,8 +29,9 @@ const MULTI_SPACE = /\s{3,}/g;
 const MULTI_NEWLINE = /\n{3,}/g;
 const CARDER_LINE = /^.*C\s*A\s*R\s*D\s*E\s*R.*$/gim;
 
-// Pattern para encontrar sección RESUELVE
-const RESUELVE_PATTERN = /\bRESUELVE\s*:/i;
+// Pattern para encontrar sección RESUELVE (flexible - con o sin dos puntos)
+// También acepta variantes OCR: RESUFLVE, RESUELV, etc.
+const RESUELVE_PATTERN = /\bRES[UÚ][EF]LV[EF]?\s*:?/i;
 const A_FAVOR_DE_PATTERN = /a\s+favor\s+de/i;
 
 export type PageText = {
@@ -176,12 +177,16 @@ export async function getPdfPageCount(file: File): Promise<number> {
 /**
  * Busca la sección RESUELVE en el texto embebido de todas las páginas
  * Retorna la página donde se encontró y el texto de esa página
+ * PRIORIDAD:
+ * 1. RESUELVE + "a favor de" (mejor caso)
+ * 2. Solo RESUELVE
+ * 3. Solo "a favor de" (fallback útil)
  */
 export async function findResuelveInEmbed(file: File): Promise<ResuelveInfo> {
   const pages = await extractAllPagesText(file);
 
+  // PRIORIDAD 1: Buscar RESUELVE + "a favor de" (mejor caso)
   for (const page of pages) {
-    // Buscar RESUELVE: y luego "a favor de"
     if (RESUELVE_PATTERN.test(page.text) && A_FAVOR_DE_PATTERN.test(page.text)) {
       return {
         found: true,
@@ -192,11 +197,23 @@ export async function findResuelveInEmbed(file: File): Promise<ResuelveInfo> {
     }
   }
 
-  // Si no encontramos ambos patrones, buscar solo RESUELVE
+  // PRIORIDAD 2: Solo RESUELVE
   for (const page of pages) {
     if (RESUELVE_PATTERN.test(page.text)) {
       return {
         found: true,
+        pageNum: page.pageNum,
+        text: page.text,
+        method: "embed",
+      };
+    }
+  }
+
+  // PRIORIDAD 3: Solo "a favor de" (fallback - puede tener los datos)
+  for (const page of pages) {
+    if (A_FAVOR_DE_PATTERN.test(page.text)) {
+      return {
+        found: true, // Marcar como encontrado para hacer OCR en esta página
         pageNum: page.pageNum,
         text: page.text,
         method: "embed",

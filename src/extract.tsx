@@ -45,27 +45,28 @@ const COMMA_NUMBER = /(\d),(\d{3})/g;
 // Ejemplo empresa: "a favor de la EMPRESA DE ENERGÍA DE PEREIRA S.A. E.S.P., identificada con NIT.816.002.019-9"
 // Ejemplo persona: "a favor de la señora MARÍA GARCÍA LÓPEZ, identificada con cédula No. 12345678"
 
-// Patrón para capturar MAYÚSCULAS después de "a favor de" hasta "identificad@"
-// Captura: texto en mayúsculas (puede incluir puntos para S.A., E.S.P., etc.)
-// NOTA: N* es variante OCR de N° o No.
-// "del" = "de" + "el", "de la" son opcionales
-// Incluye variantes OCR: Senores, Senora, Snor, etc.
-// OCR puede leer "identificada" como: lentificaca, ldentificada, etc.
+// =====================================================
+// PATRONES PRINCIPALES - NO dependen de "identificada"
+// Buscan directamente: "a favor de" + NOMBRE + "con NIT/cédula" + NÚMERO
+// =====================================================
+
+// Patrón NIT - captura TODO entre "a favor de" y "con NIT"
+// Muy flexible: no requiere que OCR lea "identificada" correctamente
 const PATTERN_MAYUSCULAS_NIT =
-  /a\s+favor\s+de(?:l|\s+la|\s+el)?\s+(?:(?:se[ñn]or[ea]?s?|senor[ea]?s?|snor[ea]?)\s+)?([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s.,]+?)\s*,?\s*[il][deo]?[en]?tific[aáeo][dcg]?[aoe]?\s+con\s+NIT[.\s:]*\s*([\d][\d.\s,-]{5,15})/i;
+  /a\s+favor\s+de(?:l|\s+la|\s+el)?\s+(?:(?:se[ñn]or[ea]?s?|senor[ea]?s?|snor[ea]?)\s+)?([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s.,]+?)(?:\s*,\s*|\s+)[^\n]*?con\s+(?:el\s+)?NIT[.\s:]*(?:N[oO°º*]?\.?\s*)?([\d][\d.\s,:-]{5,15})/i;
 
-// Patrón cédula - incluye N* como variante OCR de N°
-// N*10.023 (sin espacio después de N*) también debe funcionar
-// Incluye variantes OCR: Senores, Senora, Snor, etc.
-// OCR puede leer "identificada" como: lentificaca, ldentificada, etc.
+// Patrón cédula - captura TODO entre "a favor de" y "con cédula"
 const PATTERN_MAYUSCULAS_CEDULA =
-  /a\s+favor\s+de(?:l|\s+la|\s+el)?\s+(?:(?:se[ñn]or[ea]?s?|senor[ea]?s?|snor[ea]?)\s+)?([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s.,]+?)\s*,?\s*[il][deo]?[en]?tific[aáeo][dcg]?[aoe]?\s+con\s+c[eé]dula\s+(?:de\s+ciudadan[ií]a\s+)?[Nn][o°º*]?\.?\s*([\d][\d.\s,-]{5,15})/i;
+  /a\s+favor\s+de(?:l|\s+la|\s+el)?\s+(?:(?:se[ñn]or[ea]?s?|senor[ea]?s?|snor[ea]?)\s+)?([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s.,]+?)(?:\s*,\s*|\s+)[^\n]*?con\s+c[eé]dula\s+(?:de\s+ciudadan[ií]a\s+)?[Nn][o°º*]?\.?\s*([\d][\d.\s,:-]{5,15})/i;
 
-// Patrón alternativo más flexible (incluye N*)
-// Incluye variantes OCR: Senores, Senora, Snor, etc.
-// OCR puede leer "identificada" como: lentificaca, ldentificada, etc.
+// Patrón DIRECTO - busca "a favor de" seguido de MAYÚSCULAS hasta encontrar "con"
+// Luego busca NIT o cédula
+const PATTERN_A_FAVOR_DIRECTO =
+  /a\s+favor\s+de(?:l|\s+la|\s+el)?\s+(?:(?:se[ñn]or[ea]?s?|senor[ea]?s?|snor[ea]?)\s+)?([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s.,]+?)\s*,?[^,\n]{0,50}?con\s+(?:el\s+)?(?:NIT|c[eé]dula)[.\s:]*(?:de\s+ciudadan[ií]a\s+)?(?:[Nn][o°º*]?\.?\s*)?([\d][\d.\s,:-]{5,15})/i;
+
+// Patrón de respaldo más flexible
 const PATTERN_A_FAVOR_FLEXIBLE =
-  /a\s+favor\s+de(?:l|\s+la|\s+el)?\s+(?:(?:se[ñn]or[ea]?s?|senor[ea]?s?|snor[ea]?)\s+)?([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s.,]+?)\s*,?\s*(?:[il][deo]?[en]?tific[aáeo][dcg]?[aoe]?\s+)?con\s+(?:NIT|c[eé]dula)[.\s:]*(?:de\s+ciudadan[ií]a\s+)?(?:[Nn][o°º*]?\.?\s*)?([\d][\d.\s,-]{5,15})/i;
+  /a\s+favor\s+de(?:l|\s+la|\s+el)?\s+(?:(?:se[ñn]or[ea]?s?|senor[ea]?s?|snor[ea]?)\s+)?(.+?)\s*,?[^,\n]{0,80}?(?:NIT|c[eé]dula)[.\s:]*(?:de\s+ciudadan[ií]a\s+)?(?:[Nn][o°º*]?\.?\s*)?([\d][\d.\s,:-]{5,15})/i;
 
 // Para texto normalizado (sin acentos) - respaldo (NUM incluye variantes)
 // OCR puede leer "IDENTIFICADA" como variantes
@@ -224,17 +225,35 @@ function cleanCapturedName(name: string): string {
     .trim();
 
   // Remover sufijos que no son parte del nombre
-  // OCR puede leer "identificada" como: lentificaca, ldentificada, Identificaca, etc.
-  // Patrón flexible: [il]..entific... o variantes
-  cleaned = cleaned
-    .replace(
-      /\s*,?\s*[il][deo]?[en]?tific[aáeo][dcg]?[aoe]?\s*(?:con)?.*$/i,
-      "",
-    )
-    .trim();
+  // "Identificado Con el/la", "identificada con", etc.
+  // IMPORTANTE: Buscar desde la PRIMERA aparición de "identificad" y cortar todo después
+  
+  // Buscar índice de "identificad" (case insensitive) y cortar
+  const identIdx = cleaned.toLowerCase().indexOf("identificad");
+  if (identIdx > 0) {
+    // Cortar desde "identificad" hacia adelante
+    cleaned = cleaned.substring(0, identIdx).trim();
+  }
+  
+  // También buscar variantes OCR comunes
+  const identVariants = [
+    /\s*,?\s*[il]dentificad.*$/i,
+    /\s*,?\s*ldentificad.*$/i,
+    /\s*,?\s*lentificad.*$/i,
+    /\s*,?\s*identificad.*$/i,
+  ];
+  for (const pattern of identVariants) {
+    cleaned = cleaned.replace(pattern, "").trim();
+  }
 
   // Si termina con coma, quitarla
   cleaned = cleaned.replace(/,+$/, "").trim();
+  
+  // Si termina con "Con el" o "Con la" (residuo), quitarlo
+  cleaned = cleaned.replace(/\s+Con\s+(el|la)\s*$/i, "").trim();
+  
+  // Limpiar comas internas que quedaron sueltas antes del final
+  cleaned = cleaned.replace(/,\s*$/, "").trim();
 
   return cleaned;
 }
@@ -250,6 +269,107 @@ function isValidCapturedName(name: string): boolean {
 }
 
 /**
+ * Extrae nombre por posición - más robusto que regex
+ * Busca "a favor de" y extrae hasta "con NIT/cédula"
+ */
+function extractByPosition(text: string): ExtractionResult {
+  const lowerText = text.toLowerCase();
+  
+  // Buscar "a favor de"
+  const aFavorIdx = lowerText.indexOf("a favor de");
+  if (aFavorIdx === -1) return {};
+  
+  // Buscar "con nit" o "con cedula" después de "a favor de"
+  const afterAFavor = text.substring(aFavorIdx);
+  const lowerAfter = afterAFavor.toLowerCase();
+  
+  let conIdx = lowerAfter.indexOf(" con nit");
+  if (conIdx === -1) {
+    conIdx = lowerAfter.indexOf(" con cedula");
+  }
+  if (conIdx === -1) {
+    conIdx = lowerAfter.indexOf(" con cédula");
+  }
+  if (conIdx === -1) {
+    // También buscar "con el nit" (con artículo)
+    conIdx = lowerAfter.indexOf(" con el nit");
+  }
+  if (conIdx === -1) return {};
+  
+  // Extraer texto entre "a favor de" y "con NIT/cédula"
+  // "a favor de" tiene 10 caracteres, pero puede ser "a favor de la/el" (+3-4)
+  let nameStart = 10; // después de "a favor de"
+  const possibleStarts = ["a favor de la ", "a favor de el ", "a favor del "];
+  for (const start of possibleStarts) {
+    if (lowerAfter.startsWith(start)) {
+      nameStart = start.length;
+      break;
+    }
+  }
+  
+  // También saltar "señor/señora" si está presente
+  const afterPrefix = afterAFavor.substring(nameStart);
+  const lowerAfterPrefix = afterPrefix.toLowerCase();
+  const senorPatterns = ["señora ", "señor ", "senora ", "senor ", "la señora ", "el señor "];
+  let senorSkip = 0;
+  for (const pattern of senorPatterns) {
+    if (lowerAfterPrefix.startsWith(pattern)) {
+      senorSkip = pattern.length;
+      break;
+    }
+  }
+  
+  // Nombre está entre el inicio y "con NIT/cédula"
+  const nameText = afterAFavor.substring(nameStart + senorSkip, conIdx).trim();
+  
+  // Buscar el número después de "con NIT" o "con cédula"
+  const afterCon = afterAFavor.substring(conIdx);
+  const numMatch = afterCon.match(/(?:NIT|c[eé]dula)[^\d]*(\d[\d.,\s:-]{5,15})/i);
+  if (!numMatch) return {};
+  
+  const rawId = numMatch[1];
+  const id = cleanId(rawId);
+  
+  // Limpiar el nombre
+  let name = nameText
+    .replace(/[.,\s]+$/, "") // Quitar puntuación final
+    .replace(/^[.,\s]+/, "") // Quitar puntuación inicial
+    .trim();
+  
+  // Quitar cualquier cosa después de la última palabra en mayúsculas válida
+  // (para eliminar basura OCR como "'denuficada")
+  const words = name.split(/\s+/);
+  const cleanWords: string[] = [];
+  for (const word of words) {
+    // Palabra válida: empieza con mayúscula o es abreviatura (S.A., E.S.P., etc.)
+    if (/^[A-ZÁÉÍÓÚÑ]/.test(word) || /^[A-Z]\./.test(word)) {
+      cleanWords.push(word);
+    } else {
+      // Si encontramos una palabra que no empieza con mayúscula, paramos
+      // (probablemente es basura OCR)
+      break;
+    }
+  }
+  
+  if (cleanWords.length === 0) return {};
+  
+  name = cleanWords.join(" ");
+  name = cleanCapturedName(name);
+  
+  if (!isValidCapturedName(name) || !isValidId(id)) return {};
+  
+  // Determinar si es empresa o persona
+  const isEmpresa = /S\.?A\.?S?\.?|E\.?S\.?P\.?|LTDA/i.test(name);
+  
+  return {
+    Usuario: isEmpresa ? name : titleCase(name),
+    Identificacion: id,
+    confidence: "high",
+    method: "position_extract",
+  };
+}
+
+/**
  * Extrae datos usando el patrón "a favor de" (RESUELVE section)
  * Busca MAYÚSCULAS después de "a favor de" + NIT o cédula
  */
@@ -258,9 +378,24 @@ function extractFromResuelve(text: string): ExtractionResult {
   // ESTRATEGIA: Buscar MAYÚSCULAS después de "a favor de"
   // El nombre (persona o empresa) siempre está en MAYÚSCULAS
   // =====================================================
+  
+  // PREPROCESAMIENTO: Cortar texto después de "representad@ legalmente"
+  // Esto evita capturar al representante legal en lugar de la empresa
+  let processedText = text;
+  const representadaIdx = text.toLowerCase().indexOf("representad");
+  if (representadaIdx > 50) {
+    // Solo cortar si hay suficiente texto antes (el nombre debe estar antes)
+    processedText = text.substring(0, representadaIdx);
+  }
+  
+  // PASO 0: Intentar extracción por posición (más robusto)
+  const positionResult = extractByPosition(processedText);
+  if (positionResult.Usuario && positionResult.Identificacion) {
+    return positionResult;
+  }
 
-  // PASO 1: Intentar con NIT primero (empresas)
-  let match = text.match(PATTERN_MAYUSCULAS_NIT);
+  // PASO 1: Intentar con NIT primero (empresas) - usar texto procesado
+  let match = processedText.match(PATTERN_MAYUSCULAS_NIT);
   if (match?.[1] && match[2]) {
     const name = cleanCapturedName(match[1]);
     const id = cleanId(match[2]);
@@ -274,8 +409,8 @@ function extractFromResuelve(text: string): ExtractionResult {
     }
   }
 
-  // PASO 2: Intentar con cédula (personas)
-  match = text.match(PATTERN_MAYUSCULAS_CEDULA);
+  // PASO 2: Intentar con cédula (personas) - usar texto procesado
+  match = processedText.match(PATTERN_MAYUSCULAS_CEDULA);
   if (match?.[1] && match[2]) {
     const name = cleanCapturedName(match[1]);
     const id = cleanId(match[2]);
@@ -296,8 +431,29 @@ function extractFromResuelve(text: string): ExtractionResult {
     }
   }
 
-  // PASO 3: Patrón flexible (fallback)
-  match = text.match(PATTERN_A_FAVOR_FLEXIBLE);
+  // PASO 3: Patrón directo (no depende de "identificada")
+  match = processedText.match(PATTERN_A_FAVOR_DIRECTO);
+  if (match?.[1] && match[2]) {
+    const name = cleanCapturedName(match[1]);
+    const id = cleanId(match[2]);
+    if (isValidCapturedName(name) && isValidId(id)) {
+      const finalName =
+        name.includes("S.A.") ||
+        name.includes("E.S.P.") ||
+        name.includes("LTDA")
+          ? name
+          : titleCase(name);
+      return {
+        Usuario: finalName,
+        Identificacion: id,
+        confidence: "high",
+        method: "a_favor_directo",
+      };
+    }
+  }
+
+  // PASO 4: Patrón flexible (fallback más amplio)
+  match = processedText.match(PATTERN_A_FAVOR_FLEXIBLE);
   if (match?.[1] && match[2]) {
     const name = cleanCapturedName(match[1]);
     const id = cleanId(match[2]);
@@ -341,7 +497,13 @@ export function extractUserId(text: string): ExtractionResult {
   }
 
   // Intentar con texto normalizado
-  const norm = normalizeText(text);
+  let norm = normalizeText(text);
+  
+  // Cortar texto después de "representad@ legalmente"
+  const representadaNormIdx = norm.toLowerCase().indexOf("representad");
+  if (representadaNormIdx > 50) {
+    norm = norm.substring(0, representadaNormIdx);
+  }
 
   if (/a\s+favor\s+de/i.test(norm)) {
     const match = norm.match(PATTERN_A_FAVOR_NORM);

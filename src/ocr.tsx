@@ -48,8 +48,9 @@ const OCR_NOISE = /[|¡¿]/g;
 const MULTI_SPACE = /\s{3,}/g;
 const MULTI_NEWLINE = /\n{3,}/g;
 
-// Pattern para encontrar sección RESUELVE
-const RESUELVE_PATTERN = /\bRESUELVE\s*:/i;
+// Pattern para encontrar sección RESUELVE (flexible - con o sin dos puntos)
+// También acepta variantes OCR: RESUFLVE, RESUELV, etc.
+const RESUELVE_PATTERN = /\bRES[UÚ][EF]LV[EF]?\s*:?/i;
 const A_FAVOR_DE_PATTERN = /a\s+favor\s+de/i;
 
 function preprocessImage(canvas: HTMLCanvasElement): void {
@@ -113,7 +114,8 @@ export async function ocrSinglePage(
   const worker = await getWorker();
   const page = await pdf.getPage(pageNum);
 
-  const viewport = page.getViewport({ scale: 2.5 });
+  // Scale 3.0 para mayor resolución y precisión OCR
+  const viewport = page.getViewport({ scale: 3.0 });
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
   canvas.width = viewport.width;
@@ -155,7 +157,8 @@ export async function ocrPdfWithTesseract(
   for (let i = 1; i <= pagesToProcess; i++) {
     const page = await pdf.getPage(i);
 
-    const viewport = page.getViewport({ scale: 2.5 });
+    // Scale 3.0 para mayor resolución y precisión OCR
+    const viewport = page.getViewport({ scale: 3.0 });
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
     canvas.width = viewport.width;
@@ -169,7 +172,8 @@ export async function ocrPdfWithTesseract(
 
     preprocessImage(canvas);
 
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+    // PNG para calidad sin pérdida
+    const dataUrl = canvas.toDataURL("image/png");
     const { data } = await worker.recognize(dataUrl);
     text += data.text + "\n";
 
@@ -191,11 +195,15 @@ export async function findResuelveWithOcr(file: File): Promise<ResuelveInfo> {
 
   const worker = await getWorker();
 
+  // Variable para guardar candidato con "a favor de" (sin RESUELVE)
+  let aFavorCandidate: ResuelveInfo | null = null;
+
   // Buscar desde la página 1 hasta encontrar RESUELVE
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
 
-    const viewport = page.getViewport({ scale: 2.5 });
+    // Scale 3.0 para mayor resolución
+    const viewport = page.getViewport({ scale: 3.0 });
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
     canvas.width = viewport.width;
@@ -216,7 +224,7 @@ export async function findResuelveWithOcr(file: File): Promise<ResuelveInfo> {
     canvas.width = 0;
     canvas.height = 0;
 
-    // Verificar si esta página tiene RESUELVE y "a favor de"
+    // PRIORIDAD 1: RESUELVE + "a favor de" (mejor caso)
     if (RESUELVE_PATTERN.test(text) && A_FAVOR_DE_PATTERN.test(text)) {
       return {
         found: true,
@@ -232,7 +240,8 @@ export async function findResuelveWithOcr(file: File): Promise<ResuelveInfo> {
       // Hacer OCR de la siguiente página también
       if (i < pdf.numPages) {
         const nextPage = await pdf.getPage(i + 1);
-        const nextViewport = nextPage.getViewport({ scale: 2.5 });
+        // Scale 3.0 para mayor resolución
+        const nextViewport = nextPage.getViewport({ scale: 3.0 });
         const nextCanvas = document.createElement("canvas");
         const nextCtx = nextCanvas.getContext("2d", {
           willReadFrequently: true,
@@ -243,12 +252,16 @@ export async function findResuelveWithOcr(file: File): Promise<ResuelveInfo> {
         nextCtx.fillStyle = "white";
         nextCtx.fillRect(0, 0, nextCanvas.width, nextCanvas.height);
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await nextPage.render({ canvasContext: nextCtx, viewport: nextViewport } as any).promise;
+        await nextPage.render({
+          canvasContext: nextCtx,
+          viewport: nextViewport,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any).promise;
 
         preprocessImage(nextCanvas);
 
-        const nextDataUrl = nextCanvas.toDataURL("image/jpeg", 0.92);
+        // PNG para calidad sin pérdida
+        const nextDataUrl = nextCanvas.toDataURL("image/png");
         const nextResult = await worker.recognize(nextDataUrl);
         const nextText = cleanOcrText(nextResult.data.text);
 
@@ -276,6 +289,25 @@ export async function findResuelveWithOcr(file: File): Promise<ResuelveInfo> {
         method: "ocr",
       };
     }
+
+    // PRIORIDAD 2: Solo "a favor de" (fallback útil si no hay RESUELVE)
+    if (A_FAVOR_DE_PATTERN.test(text)) {
+      // Guardar como candidato, pero seguir buscando RESUELVE
+      // Si no encontramos RESUELVE en ninguna página, usaremos esta
+      if (!aFavorCandidate) {
+        aFavorCandidate = {
+          found: true,
+          pageNum: i,
+          text: text,
+          method: "ocr",
+        };
+      }
+    }
+  }
+
+  // Si encontramos "a favor de" sin RESUELVE, usarlo como fallback
+  if (aFavorCandidate) {
+    return aFavorCandidate;
   }
 
   return {
