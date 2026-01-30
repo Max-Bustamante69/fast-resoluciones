@@ -4,11 +4,37 @@ Sistema web para extraer automáticamente **Usuario** e **Identificación** desd
 
 ## Características
 
-- **Extracción automática**: Usa OCR (Tesseract.js) y texto embebido para extraer datos de PDFs
+- **Extracción basada en sección RESUELVE**: Busca la sección "RESUELVE" del documento donde aparece "a favor de [nombre]" con la identificación
+- **Búsqueda inteligente**: Primero intenta con texto embebido, luego OCR si es necesario
 - **Procesamiento masivo**: Procesa cientos de resoluciones en minutos
 - **Tres modos de operación**: Principal, Prueba y Verificación
-- **Reportes detallados**: Genera un archivo TXT con el resultado completo del procesamiento
+- **Reportes detallados**: Genera dos archivos TXT - reporte principal y estadísticas de páginas RESUELVE
 - **Funciona offline**: Todo se procesa en el navegador, sin enviar datos a servidores externos
+
+---
+
+## Cómo Funciona la Extracción
+
+El sistema busca los datos siguiendo esta lógica:
+
+1. **Busca la sección "RESUELVE:"** en el documento
+2. **Dentro de RESUELVE**, busca el patrón:
+   ```
+   "a favor de [el/la señor/a] NOMBRE, identificad@ con cédula/NIT No. NÚMERO"
+   ```
+3. **La sección RESUELVE puede estar en cualquier página** (3, 4, 5, 6, 7...)
+4. Primero intenta con texto embebido (rápido), si no encuentra usa OCR
+
+### Ejemplo de texto que extrae:
+
+```
+ARTÍCULO PRIMERO: Otorgar Permiso... a favor de la señora TAKIS PANQUEVA ARENAS 
+DE LA ROSA, identificada con cédula de ciudadanía No. 1.031.140.199...
+```
+
+Extrae:
+- **Usuario**: Takis Panqueva Arenas De La Rosa
+- **Identificación**: 1031140199
 
 ---
 
@@ -86,6 +112,7 @@ RS-[NÚMERO 4 DÍGITOS]-[DÍA]-[MES]-[AÑO].pdf
 3. Al finalizar:
    - Se descargará automáticamente el **Excel completado** (`resoluciones_completadas.xlsx`)
    - Se descargará un **reporte TXT** (`reporte_resoluciones.txt`) con el detalle
+   - Se descargará un **reporte de estadísticas RESUELVE** (`estadisticas_resuelve.txt`)
 
 #### Interpretar el registro
 
@@ -107,14 +134,15 @@ Permite probar la extracción con un solo PDF antes de procesar en lote.
 2. Haz clic en **"Probar extracción"**
 3. Verás:
    - El nombre y cédula extraídos (si se encontraron)
-   - El texto OCR y texto embebido para comparar
+   - La página donde se encontró la sección RESUELVE
+   - El texto extraído para análisis
 4. Opcionalmente descarga un Excel de prueba con los datos
 
 **Útil para:**
 
 - Verificar que un PDF específico se procesa correctamente
 - Diagnosticar problemas de extracción
-- Entender por qué un PDF no extrae datos
+- Ver en qué página está la sección RESUELVE
 
 ---
 
@@ -142,29 +170,44 @@ Compara los datos de un Excel ya completado contra los PDFs originales.
 El Excel completado tendrá las columnas Usuario e Identificacion con formato:
 
 ```
-Usuario: "Juan Pérez García [OCR]"
+Usuario: "Juan Pérez García [OCR (pág 5)]"
 Identificacion: "12345678"
 ```
 
 El texto entre corchetes indica la fuente:
 
-- `[OCR]` - Extraído mediante reconocimiento óptico
-- `[EMBED]` - Extraído del texto embebido en el PDF
-- `[OCR+EMBED]` - Combinación de ambos métodos
-- `[REVISAR]` - El dato requiere verificación manual
+- `[OCR (pág X)]` - Extraído mediante OCR de la página X
+- `[EMBED (pág X)]` - Extraído del texto embebido de la página X
+- El número de página indica dónde se encontró la sección RESUELVE
 
 ---
 
-## Formato del Reporte TXT
+## Reportes Generados
 
-El archivo `reporte_resoluciones.txt` incluye:
+### 1. Reporte Principal (`reporte_resoluciones.txt`)
+
+Incluye:
 
 1. **Resumen**: Totales de éxitos, revisiones, parciales, errores y sin archivo
 2. **Exitosos**: Lista de resoluciones procesadas correctamente
 3. **A Revisar**: Resoluciones con datos pero baja confianza
 4. **Parciales**: Resoluciones donde solo se encontró nombre o cédula
-5. **Errores**: Resoluciones donde no se pudo extraer nada
-6. **Sin Archivo**: Resoluciones del Excel que no tienen PDF correspondiente
+5. **Sin RESUELVE**: Resoluciones donde no se encontró la sección RESUELVE
+6. **Errores**: Resoluciones donde no se pudo extraer nada
+7. **Sin Archivo**: Resoluciones del Excel que no tienen PDF correspondiente
+
+### 2. Estadísticas RESUELVE (`estadisticas_resuelve.txt`)
+
+Incluye:
+
+1. **Resumen por método**: Cuántos se encontraron en EMBED vs OCR
+2. **Distribución por página**: En qué páginas aparece la sección RESUELVE
+3. **Archivos sin RESUELVE**: Lista de archivos donde no se encontró la sección
+4. **Detalle completo**: Tabla con cada archivo, página y método usado
+
+**Útil para:**
+- Optimizar futuros procesamientos conociendo el rango de páginas típico
+- Identificar archivos con formato diferente
 
 ---
 
@@ -179,11 +222,17 @@ El archivo `reporte_resoluciones.txt` incluye:
   - Resolución `176` → busca `RS-0176-*.pdf`
   - Resolución `3588` → busca `RS-3588-*.pdf`
 
-### "No se encontró señor/a ni cédula"
+### "No se encontró la sección RESUELVE"
 
 - El PDF puede tener un formato diferente al esperado
+- Verifica que el documento contenga la palabra "RESUELVE:"
 - Usa el modo Prueba para ver el texto extraído
-- Algunos PDFs escaneados con baja calidad pueden fallar
+
+### "No se encontró 'a favor de'"
+
+- La sección RESUELVE se encontró pero no tiene el patrón esperado
+- El documento puede usar un formato diferente (ej: empresas vs personas naturales)
+- Verifica manualmente el contenido del PDF
 
 ### "Datos extraídos incorrectos"
 
@@ -192,9 +241,9 @@ El archivo `reporte_resoluciones.txt` incluye:
 
 ### El procesamiento es muy lento
 
-- Los PDFs escaneados requieren OCR, que toma ~5-10 segundos por archivo
-- PDFs con texto embebido se procesan instantáneamente
-- El sistema procesa solo la primera página de cada PDF
+- La búsqueda de RESUELVE puede requerir revisar varias páginas con OCR
+- PDFs con texto embebido se procesan más rápido
+- El reporte de estadísticas te ayudará a entender el rendimiento
 
 ---
 

@@ -6,22 +6,28 @@ import {
   writeRows,
   downloadWorkbook,
 } from "./excel";
-import { extractTextFromPdf } from "./pdfText";
-import { ocrPdfWithTesseract } from "./ocr";
-import { extractUserId } from "./extract";
+import { findResuelveInEmbed, type ResuelveInfo } from "./pdfText";
+import { ocrPdfWithTesseract, findResuelveWithOcr, ocrSinglePage } from "./ocr";
+import {
+  extractUserId,
+  hasAFavorPattern,
+  extractFallbackFirstPage,
+} from "./extract";
 
 type LogEntry = {
   message: string;
   type: "info" | "success" | "error" | "warning" | "review" | "partial";
   details?: {
     fileName?: string;
-    fileUrl?: string; // URL blob para abrir el archivo
+    fileUrl?: string;
     reason?: string;
     extractedText?: string;
-    ocrText?: string; // Texto extraído con OCR
-    embedText?: string; // Texto extraído con EMBED
+    ocrText?: string;
+    embedText?: string;
     searchedFor?: string;
     availableFiles?: string[];
+    resuelvePage?: number; // Página donde se encontró RESUELVE
+    resuelveMethod?: string; // "embed" o "ocr"
   };
 };
 
@@ -33,6 +39,17 @@ const ID_COL = "Identificacion";
 function LogEntryItem({ entry }: { entry: LogEntry }) {
   const [expanded, setExpanded] = useState(false);
   const hasDetails = entry.details && Object.keys(entry.details).length > 0;
+
+  // Construir URL con página específica si está disponible
+  const getPdfUrl = () => {
+    if (!entry.details?.fileUrl) return "";
+    const baseUrl = entry.details.fileUrl;
+    // Agregar #page=X para abrir en la página del RESUELVE
+    if (entry.details.resuelvePage) {
+      return `${baseUrl}#page=${entry.details.resuelvePage}`;
+    }
+    return baseUrl;
+  };
 
   return (
     <div
@@ -51,6 +68,16 @@ function LogEntryItem({ entry }: { entry: LogEntry }) {
       </div>
       {expanded && entry.details && (
         <div className="log-entry-details">
+          {entry.details.resuelvePage && (
+            <div className="detail-item">
+              <span className="detail-label">📍 RESUELVE encontrado:</span>
+              <span className="detail-value">
+                Página {entry.details.resuelvePage}
+                {entry.details.resuelveMethod &&
+                  ` (${entry.details.resuelveMethod.toUpperCase()})`}
+              </span>
+            </div>
+          )}
           {entry.details.reason && (
             <div className="detail-item">
               <span className="detail-label">Razón:</span>
@@ -64,13 +91,15 @@ function LogEntryItem({ entry }: { entry: LogEntry }) {
                 {entry.details.fileName}
                 {entry.details.fileUrl && (
                   <a
-                    href={entry.details.fileUrl}
+                    href={getPdfUrl()}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="file-link"
                     onClick={(e) => e.stopPropagation()}
                   >
                     Abrir PDF
+                    {entry.details.resuelvePage &&
+                      ` (pág ${entry.details.resuelvePage})`}
                   </a>
                 )}
               </span>
@@ -254,7 +283,8 @@ export default function App() {
     ocrText?: string;
     embedText?: string;
     needsReview?: boolean;
-    source?: string; // "OCR" o "texto embebido"
+    source?: string;
+    resuelvePage?: number;
   } | null>(null);
   const [testBusy, setTestBusy] = useState(false);
 
@@ -423,25 +453,61 @@ export default function App() {
           continue;
         }
 
-        // Extraer datos del PDF
+        // Extraer datos del PDF usando RESUELVE (EMBED para página, OCR para texto)
+        let resuelveInfo: ResuelveInfo = {
+          found: false,
+          pageNum: null,
+          text: "",
+          method: null,
+        };
         let text = "";
+
+        // 1. Buscar RESUELVE en embed (para encontrar página)
         try {
-          text = await extractTextFromPdf(matchedFile);
+          const embedInfo = await findResuelveInEmbed(matchedFile);
+          if (embedInfo.found && embedInfo.pageNum) {
+            // Hacer OCR en la página encontrada
+            try {
+              text = await ocrSinglePage(matchedFile, embedInfo.pageNum);
+              resuelveInfo = {
+                found: true,
+                pageNum: embedInfo.pageNum,
+                text: text,
+                method: "ocr",
+              };
+            } catch {
+              // Fallback a embed si OCR falla
+              resuelveInfo = embedInfo;
+              text = embedInfo.text;
+            }
+          }
         } catch {
-          text = "";
+          // Continuar con búsqueda OCR completa
         }
 
-        let data = extractUserId(text);
-
-        if (!data.Usuario || !data.Identificacion) {
+        // 2. Si no se encontró en embed, buscar con OCR página por página
+        if (!resuelveInfo.found || !hasAFavorPattern(text)) {
           try {
-            const ocrText = await ocrPdfWithTesseract(matchedFile);
-            text = ocrText;
-            data = extractUserId(ocrText);
+            const ocrResuelve = await findResuelveWithOcr(matchedFile);
+            if (ocrResuelve.found) {
+              resuelveInfo = ocrResuelve;
+              text = ocrResuelve.text;
+            }
           } catch {
-            // Mantener texto embebido
+            // Continuar
           }
         }
+
+        // 3. Fallback a OCR página 1
+        if (!resuelveInfo.found) {
+          try {
+            text = await ocrPdfWithTesseract(matchedFile, 1);
+          } catch {
+            // Continuar
+          }
+        }
+
+        const data = extractUserId(text);
 
         // Comparar con Excel - limpiar para comparación
         const cleanExistingUser = existingUser
@@ -564,16 +630,28 @@ export default function App() {
           | "PARTIAL"
           | "ERROR"
           | "NO_FILE"
-          | "OCR_FAIL";
+          | "NO_RESUELVE";
         resolution: string;
         fileName?: string;
         reason?: string;
         foundName?: string;
         foundId?: string;
         extractedText?: string;
-        source?: string; // "OCR" or "texto embebido"
+        source?: string;
+        resuelvePage?: number;
+        resuelveMethod?: string;
       };
       const allReports: ResultReport[] = [];
+
+      // Estadísticas de páginas RESUELVE
+      type ResuelveStats = {
+        resolution: string;
+        fileName: string;
+        pageNum: number | null;
+        locatedVia: "embed" | "ocr" | null; // Cómo se encontró la página
+        found: boolean;
+      };
+      const resuelveStats: ResuelveStats[] = [];
 
       for (let i = 0; i < rowsToProcess.length; i++) {
         const { row, key } = rowsToProcess[i];
@@ -608,12 +686,10 @@ export default function App() {
         }
 
         if (!matchedFile) {
-          // No se encontró el PDF para esta fila
           row[USER_COL] = "ERROR - Sin archivo";
           row[ID_COL] = "ERROR - Sin archivo";
           notFound++;
 
-          // Buscar nombres similares para ayudar al debug
           const similarFiles = rsNames.filter((name) => {
             return (
               name.includes(paddedNum) ||
@@ -637,70 +713,113 @@ export default function App() {
           continue;
         }
 
-        // Procesar el PDF encontrado
-        // PRIORIDAD: OCR primero, EMBED como refuerzo
-        let embedText = "";
+        // =====================================================
+        // LÓGICA: EMBED para encontrar página, OCR para extraer
+        // =====================================================
+        let resuelveInfo: ResuelveInfo = {
+          found: false,
+          pageNum: null,
+          text: "",
+          method: null,
+        };
+        let resuelveText = "";
         let ocrText = "";
-        let finalSource = "";
-        let usedEmbed = false; // Para marcar si se usó EMBED (siempre warning)
+        let locatedVia: "embed" | "ocr" | null = null;
 
-        // PASO 1: Intentar OCR PRIMERO (prioridad)
+        // PASO 1: Buscar RESUELVE en texto embebido (rápido, para encontrar página)
         try {
-          ocrText = await ocrPdfWithTesseract(matchedFile);
-        } catch (e) {
-          const ocrError = e instanceof Error ? e.message : "Error en OCR";
-          ocrText = "";
-          pushLog(`OCR falló para ${key}, intentando EMBED...`, "info", {
-            reason: ocrError,
-          });
+          const embedInfo = await findResuelveInEmbed(matchedFile);
+          if (embedInfo.found && embedInfo.pageNum) {
+            locatedVia = "embed"; // Página encontrada vía EMBED
+            // Encontramos la página con EMBED, ahora hacemos OCR en esa página
+            try {
+              ocrText = await ocrSinglePage(matchedFile, embedInfo.pageNum);
+              resuelveInfo = {
+                found: true,
+                pageNum: embedInfo.pageNum,
+                text: ocrText,
+                method: "ocr",
+              };
+              resuelveText = ocrText;
+            } catch {
+              // Si OCR falla, usar el texto embed como fallback
+              resuelveInfo = embedInfo;
+              resuelveText = embedInfo.text;
+            }
+          }
+        } catch {
+          // Ignorar error, intentaremos búsqueda OCR completa
         }
 
-        // PASO 2: Extraer datos del OCR
-        const ocrData = extractUserId(ocrText);
-        const finalData = { ...ocrData };
-        let displayText = ocrText;
-
-        // PASO 3: Si OCR no encontró todo, usar EMBED como refuerzo
-        if (!ocrData.Usuario || !ocrData.Identificacion) {
+        // PASO 2: Si no se encontró en embed, buscar con OCR página por página
+        if (!resuelveInfo.found || !hasAFavorPattern(resuelveText)) {
           try {
-            embedText = await extractTextFromPdf(matchedFile);
-            const embedData = extractUserId(embedText);
+            const ocrResuelve = await findResuelveWithOcr(matchedFile);
+            if (ocrResuelve.found) {
+              locatedVia = "ocr"; // Página encontrada vía búsqueda OCR
+              resuelveInfo = ocrResuelve;
+              ocrText = ocrResuelve.text;
+              resuelveText = ocrText;
+            }
+          } catch (e) {
+            const err = e instanceof Error ? e.message : "Error OCR";
+            pushLog(`OCR falló para ${key}: ${err}`, "info");
+          }
+        }
 
-            // Usar EMBED solo para completar lo que falta
-            if (!finalData.Usuario && embedData.Usuario) {
-              finalData.Usuario = embedData.Usuario;
-              usedEmbed = true;
-            }
-            if (!finalData.Identificacion && embedData.Identificacion) {
-              finalData.Identificacion = embedData.Identificacion;
-              usedEmbed = true;
-            }
+        // Guardar estadísticas de RESUELVE
+        resuelveStats.push({
+          resolution: key,
+          fileName: matchedFile.name,
+          pageNum: resuelveInfo.pageNum,
+          locatedVia: locatedVia,
+          found: resuelveInfo.found,
+        });
 
-            // Si no había texto OCR, usar embed como display
-            if (!displayText) {
-              displayText = embedText;
-            }
+        // PASO 3: Si no se encontró RESUELVE, fallback a OCR página 1
+        let usedFallback = false;
+        if (!resuelveInfo.found) {
+          try {
+            ocrText = await ocrPdfWithTesseract(matchedFile, 1);
+            resuelveText = ocrText;
+            usedFallback = true;
+            locatedVia = null; // No se encontró RESUELVE, usamos fallback
           } catch {
-            embedText = "";
+            // Continuar sin OCR
           }
         }
 
-        // Determinar fuente final
-        if (finalData.Usuario || finalData.Identificacion) {
-          if (usedEmbed && ocrText) {
-            finalSource = "OCR+EMBED";
-          } else if (usedEmbed) {
-            finalSource = "EMBED";
-          } else {
-            finalSource = "OCR";
+        // PASO 4: Extraer datos del texto
+        // Si usamos fallback, usar patrones señor/señora de primera página
+        // Si encontramos RESUELVE, usar patrones de "a favor de"
+        let finalData;
+        if (usedFallback) {
+          // Primero intentar con extractUserId (puede encontrar "a favor de" en pág 1)
+          finalData = extractUserId(resuelveText);
+          // Si no encontró nada, usar patrones de fallback señor/señora
+          if (!finalData.Usuario && !finalData.Identificacion) {
+            finalData = extractFallbackFirstPage(resuelveText);
           }
+          // Siempre marcar fallback para revisión
+          if (finalData.Usuario || finalData.Identificacion) {
+            finalData.needsReview = true;
+            finalData.confidence = "low";
+          }
+        } else {
+          finalData = extractUserId(resuelveText);
         }
 
-        // PASO 4: Procesar resultados
-        // Si se usó EMBED en cualquier parte, SIEMPRE es warning
+        let finalSource = usedFallback ? "OCR (pág 1 - FALLBACK)" : "OCR";
+        if (resuelveInfo.pageNum) {
+          finalSource = `OCR (pág ${resuelveInfo.pageNum})`;
+        }
+
+        // PASO 5: Procesar resultados
         if (finalData.Usuario && finalData.Identificacion) {
-          // Ambos encontrados
-          const needsReview = usedEmbed || finalData.needsReview;
+          const needsReview =
+            finalData.needsReview ||
+            finalData.confidence !== "high" ||
+            !resuelveInfo.found;
 
           if (needsReview) {
             row[USER_COL] = `${finalData.Usuario} [${finalSource}]`;
@@ -712,10 +831,12 @@ export default function App() {
               {
                 fileName: matchedFile.name,
                 fileUrl: URL.createObjectURL(matchedFile),
-                reason: usedEmbed
-                  ? `Se usó EMBED (poco confiable). Fuente: ${finalSource}`
-                  : `Baja confianza. Fuente: ${finalSource}`,
-                extractedText: displayText,
+                reason: usedFallback
+                  ? "⚠️ FALLBACK: No se encontró RESUELVE, se usaron patrones señor/señora en pág 1"
+                  : `Confianza: ${finalData.confidence}`,
+                resuelvePage: resuelveInfo.pageNum ?? undefined,
+                resuelveMethod: resuelveInfo.method ?? undefined,
+                extractedText: resuelveText.slice(0, 5000),
               },
             );
 
@@ -725,14 +846,15 @@ export default function App() {
               fileName: matchedFile.name,
               foundName: finalData.Usuario,
               foundId: finalData.Identificacion,
-              reason: usedEmbed
-                ? `Se usó EMBED (poco confiable). Fuente: ${finalSource}`
-                : `Baja confianza. Fuente: ${finalSource}`,
+              reason: usedFallback
+                ? "FALLBACK: No RESUELVE, patrones señor/señora pág 1"
+                : `Confianza: ${finalData.confidence}`,
               source: finalSource,
-              extractedText: displayText,
+              resuelvePage: resuelveInfo.pageNum ?? undefined,
+              resuelveMethod: resuelveInfo.method ?? undefined,
+              extractedText: resuelveText.slice(0, 2000),
             });
           } else {
-            // Encontrado solo con OCR y alta confianza - SUCCESS
             row[USER_COL] = `${finalData.Usuario} [${finalSource}]`;
             row[ID_COL] = finalData.Identificacion;
             filled++;
@@ -742,6 +864,9 @@ export default function App() {
               {
                 fileName: matchedFile.name,
                 fileUrl: URL.createObjectURL(matchedFile),
+                resuelvePage: resuelveInfo.pageNum ?? undefined,
+                resuelveMethod: resuelveInfo.method ?? undefined,
+                extractedText: resuelveText.slice(0, 5000),
               },
             );
 
@@ -752,10 +877,11 @@ export default function App() {
               foundName: finalData.Usuario,
               foundId: finalData.Identificacion,
               source: finalSource,
+              resuelvePage: resuelveInfo.pageNum ?? undefined,
+              resuelveMethod: resuelveInfo.method ?? undefined,
             });
           }
         } else if (finalData.Usuario || finalData.Identificacion) {
-          // PARCIAL: Solo se encontró uno de los dos
           partials++;
           row[USER_COL] = finalData.Usuario
             ? `${finalData.Usuario} [${finalSource}]`
@@ -770,65 +896,54 @@ export default function App() {
           pushLog(`${key} → ${found} [PARCIAL - ${finalSource}]`, "partial", {
             fileName: matchedFile.name,
             fileUrl: URL.createObjectURL(matchedFile),
-            reason: `Solo se encontró ${finalData.Usuario ? "el nombre" : "la cédula"}. Falta: ${missing}. Se probó OCR y EMBED.`,
-            ocrText: ocrText || "(OCR no extrajo texto)",
-            embedText: embedText || "(EMBED no extrajo texto)",
+            reason: `Solo se encontró ${finalData.Usuario ? "el nombre" : "la cédula"}. Falta: ${missing}.`,
+            resuelvePage: resuelveInfo.pageNum ?? undefined,
+            resuelveMethod: resuelveInfo.method ?? undefined,
+            extractedText: resuelveText.slice(0, 5000),
           });
 
           allReports.push({
             type: "PARTIAL",
             resolution: key,
             fileName: matchedFile.name,
-            reason: `Solo se encontró ${finalData.Usuario ? "el nombre" : "la cédula"}. Falta: ${missing}. Se probó OCR y EMBED.`,
+            reason: `Solo se encontró ${finalData.Usuario ? "el nombre" : "la cédula"}. Falta: ${missing}.`,
             foundName: finalData.Usuario,
             foundId: finalData.Identificacion,
-            source: finalSource || "OCR+EMBED",
-            extractedText: `=== TEXTO OCR ===\n${ocrText || "(vacío)"}\n\n=== TEXTO EMBED ===\n${embedText || "(vacío)"}`,
+            source: finalSource,
+            resuelvePage: resuelveInfo.pageNum ?? undefined,
+            resuelveMethod: resuelveInfo.method ?? undefined,
+            extractedText: resuelveText.slice(0, 2000),
           });
         } else {
-          // Ninguno encontrado (se probaron ambos métodos)
-          row[USER_COL] = "ERROR [OCR+EMBED]";
+          row[USER_COL] = "ERROR";
           row[ID_COL] = "ERROR";
           errors++;
 
-          // Usar el texto más largo para mostrar
-          const allText = ocrText || embedText;
-          let reason = "No se encontró el patrón esperado en el texto.";
-          if (!allText || allText.length === 0) {
-            reason = "No se pudo extraer ningún texto del PDF.";
-          } else if (allText.length < 100) {
-            reason = `Solo se extrajeron ${allText.length} caracteres.`;
-          } else {
-            const lower = allText.toLowerCase();
-            const hasSenor = /se[ñn]or|senor|snor|sñor|senores/i.test(lower);
-            const hasIdentificado = /identificad/i.test(lower);
-            const hasCedula = /c[eé]dula|cedula/i.test(lower);
-
-            if (!hasSenor && !hasIdentificado) {
-              reason = "No se encontró 'señor/a' ni 'identificado/a'.";
-            } else if (!hasCedula) {
-              reason = "No se encontró 'cédula' en el texto.";
-            } else {
-              reason =
-                "Se encontraron palabras clave pero no el patrón completo.";
-            }
+          let reason = "No se encontró el patrón 'a favor de' + nombre + ID.";
+          if (!resuelveInfo.found) {
+            reason = "No se encontró la sección RESUELVE en ninguna página.";
+          } else if (!hasAFavorPattern(resuelveText)) {
+            reason = `RESUELVE encontrado (pág ${resuelveInfo.pageNum}) pero sin patrón 'a favor de'.`;
           }
 
-          pushLog(`Error: ${key} [OCR+EMBED]`, "error", {
+          pushLog(`Error: ${key}`, "error", {
             fileName: matchedFile.name,
             fileUrl: URL.createObjectURL(matchedFile),
-            reason: reason + " (Se probó OCR y EMBED)",
-            ocrText: ocrText || "(OCR no extrajo texto)",
-            embedText: embedText || "(EMBED no extrajo texto)",
+            reason,
+            resuelvePage: resuelveInfo.pageNum ?? undefined,
+            resuelveMethod: resuelveInfo.method ?? undefined,
+            extractedText: resuelveText.slice(0, 5000),
           });
 
           allReports.push({
-            type: "ERROR",
+            type: resuelveInfo.found ? "ERROR" : "NO_RESUELVE",
             resolution: key,
             fileName: matchedFile.name,
-            reason: reason + " (Se probó OCR y EMBED)",
-            source: "OCR+EMBED",
-            extractedText: `=== TEXTO OCR ===\n${ocrText || "(vacío)"}\n\n=== TEXTO EMBED ===\n${embedText || "(vacío)"}`,
+            reason,
+            source: finalSource,
+            resuelvePage: resuelveInfo.pageNum ?? undefined,
+            resuelveMethod: resuelveInfo.method ?? undefined,
+            extractedText: resuelveText.slice(0, 2000),
           });
         }
       }
@@ -866,8 +981,9 @@ export default function App() {
       const successReports = allReports.filter((r) => r.type === "SUCCESS");
       const reviewReports = allReports.filter((r) => r.type === "REVIEW");
       const partialReports = allReports.filter((r) => r.type === "PARTIAL");
-      const errorOnlyReports = allReports.filter(
-        (r) => r.type === "ERROR" || r.type === "OCR_FAIL",
+      const errorOnlyReports = allReports.filter((r) => r.type === "ERROR");
+      const noResuelveReports = allReports.filter(
+        (r) => r.type === "NO_RESUELVE",
       );
       const noFileReports = allReports.filter((r) => r.type === "NO_FILE");
 
@@ -876,9 +992,14 @@ export default function App() {
         reportLines.push("=".repeat(80));
         reportLines.push(`✓ EXITOSOS (${successReports.length})`);
         reportLines.push("=".repeat(80));
+        reportLines.push("Resolución | Nombre | ID | Página RESUELVE");
+        reportLines.push("-".repeat(80));
         for (const report of successReports) {
+          const pageInfo = report.resuelvePage
+            ? `pág ${report.resuelvePage}`
+            : "N/A";
           reportLines.push(
-            `${report.resolution} → ${report.foundName} - ${report.foundId}`,
+            `${report.resolution} | ${report.foundName} | ${report.foundId} | ${pageInfo}`,
           );
         }
         reportLines.push("");
@@ -889,9 +1010,14 @@ export default function App() {
         reportLines.push("=".repeat(80));
         reportLines.push(`⚠ A REVISAR (${reviewReports.length})`);
         reportLines.push("=".repeat(80));
+        reportLines.push("Resolución | Nombre | ID | Fuente | Página");
+        reportLines.push("-".repeat(80));
         for (const report of reviewReports) {
+          const pageInfo = report.resuelvePage
+            ? `pág ${report.resuelvePage}`
+            : "N/A";
           reportLines.push(
-            `${report.resolution} | ${report.foundName} | ${report.foundId} | ${report.source}`,
+            `${report.resolution} | ${report.foundName} | ${report.foundId} | ${report.source} | ${pageInfo}`,
           );
         }
         reportLines.push("");
@@ -926,8 +1052,11 @@ export default function App() {
         reportLines.push("=".repeat(80));
         for (const report of partialReports) {
           reportLines.push("-".repeat(40));
+          const pageInfo = report.resuelvePage
+            ? `| pág ${report.resuelvePage}`
+            : "";
           reportLines.push(
-            `${report.resolution} | ${report.fileName} | ${report.source}`,
+            `${report.resolution} | ${report.fileName} | ${report.source} ${pageInfo}`,
           );
           if (report.foundName)
             reportLines.push(`  NOMBRE: ${report.foundName}`);
@@ -949,8 +1078,11 @@ export default function App() {
         reportLines.push("=".repeat(80));
         for (const report of errorOnlyReports) {
           reportLines.push("-".repeat(40));
+          const pageInfo = report.resuelvePage
+            ? `| pág ${report.resuelvePage}`
+            : "";
           reportLines.push(
-            `${report.resolution} | ${report.fileName || "N/A"} | ${report.source}`,
+            `${report.resolution} | ${report.fileName || "N/A"} | ${report.source} ${pageInfo}`,
           );
           reportLines.push(`  RAZÓN: ${report.reason}`);
           if (report.extractedText) {
@@ -962,12 +1094,25 @@ export default function App() {
         reportLines.push("");
       }
 
+      // NO RESUELVE SECTION
+      if (noResuelveReports.length > 0) {
+        reportLines.push("=".repeat(80));
+        reportLines.push(
+          `⊘ SIN SECCIÓN RESUELVE (${noResuelveReports.length})`,
+        );
+        reportLines.push("=".repeat(80));
+        for (const report of noResuelveReports) {
+          reportLines.push(`${report.resolution} | ${report.fileName}`);
+          if (report.reason) reportLines.push(`  → ${report.reason}`);
+        }
+        reportLines.push("");
+      }
+
       // NO FILE SECTION (compact: just list numbers)
       if (noFileReports.length > 0) {
         reportLines.push("=".repeat(80));
         reportLines.push(`? SIN ARCHIVO PDF (${noFileReports.length})`);
         reportLines.push("=".repeat(80));
-        // Group in rows of 10 for compactness
         const nums = noFileReports.map((r) => r.resolution);
         for (let i = 0; i < nums.length; i += 10) {
           reportLines.push(nums.slice(i, i + 10).join(", "));
@@ -987,6 +1132,95 @@ export default function App() {
       a.download = "reporte_resoluciones.txt";
       a.click();
       URL.revokeObjectURL(url);
+
+      // =====================================================
+      // REPORTE DE ESTADÍSTICAS RESUELVE (archivo separado)
+      // =====================================================
+      const statsLines: string[] = [
+        "=".repeat(80),
+        "ESTADÍSTICAS DE SECCIÓN RESUELVE",
+        "=".repeat(80),
+        `Fecha: ${new Date().toLocaleString()}`,
+        `Total archivos procesados: ${resuelveStats.length}`,
+        "",
+      ];
+
+      // Calcular estadísticas por página
+      const pageStats: Record<number, number> = {};
+      const locationStats = { embed: 0, ocr: 0, notFound: 0 };
+      for (const stat of resuelveStats) {
+        if (stat.found && stat.pageNum) {
+          pageStats[stat.pageNum] = (pageStats[stat.pageNum] || 0) + 1;
+          if (stat.locatedVia === "embed") locationStats.embed++;
+          else if (stat.locatedVia === "ocr") locationStats.ocr++;
+        } else {
+          locationStats.notFound++;
+        }
+      }
+
+      statsLines.push("RESUMEN DE LOCALIZACIÓN:");
+      statsLines.push(
+        `  - Página ubicada vía EMBED (rápido): ${locationStats.embed}`,
+      );
+      statsLines.push(
+        `  - Página ubicada vía OCR (búsqueda): ${locationStats.ocr}`,
+      );
+      statsLines.push(`  - RESUELVE NO ENCONTRADO: ${locationStats.notFound}`);
+      statsLines.push(
+        "  (Nota: La extracción siempre usa OCR para mayor precisión)",
+      );
+      statsLines.push("");
+
+      statsLines.push("DISTRIBUCIÓN POR PÁGINA:");
+      const sortedPages = Object.entries(pageStats).sort(
+        ([a], [b]) => Number(a) - Number(b),
+      );
+      for (const [page, count] of sortedPages) {
+        const pct = ((count / resuelveStats.length) * 100).toFixed(1);
+        statsLines.push(`  Página ${page}: ${count} archivos (${pct}%)`);
+      }
+      statsLines.push("");
+
+      // Detalle de archivos sin RESUELVE
+      const notFoundStats = resuelveStats.filter((s) => !s.found);
+      if (notFoundStats.length > 0) {
+        statsLines.push("=".repeat(80));
+        statsLines.push(
+          `ARCHIVOS SIN SECCIÓN RESUELVE (${notFoundStats.length}):`,
+        );
+        statsLines.push("=".repeat(80));
+        for (const stat of notFoundStats) {
+          statsLines.push(`  ${stat.resolution} | ${stat.fileName}`);
+        }
+        statsLines.push("");
+      }
+
+      // Detalle completo
+      statsLines.push("=".repeat(80));
+      statsLines.push("DETALLE COMPLETO:");
+      statsLines.push("=".repeat(80));
+      statsLines.push("Resolución | Archivo | Página | Ubicado vía");
+      statsLines.push("-".repeat(80));
+      for (const stat of resuelveStats) {
+        const page = stat.pageNum ?? "N/A";
+        const located = stat.locatedVia
+          ? stat.locatedVia.toUpperCase()
+          : "NO ENCONTRADO";
+        statsLines.push(
+          `${stat.resolution} | ${stat.fileName} | ${page} | ${located}`,
+        );
+      }
+
+      const statsText = statsLines.join("\n");
+      const statsBlob = new Blob([statsText], {
+        type: "text/plain;charset=utf-8",
+      });
+      const statsUrl = URL.createObjectURL(statsBlob);
+      const statsLink = document.createElement("a");
+      statsLink.href = statsUrl;
+      statsLink.download = "estadisticas_resuelve.txt";
+      statsLink.click();
+      URL.revokeObjectURL(statsUrl);
 
       const total = rowsToProcess.length;
       const reviewMsg = reviews > 0 ? `, ${reviews} a revisar` : "";
@@ -1015,68 +1249,85 @@ export default function App() {
     setTestResult(null);
 
     try {
-      let embedText = "";
+      let resuelveInfo: ResuelveInfo = {
+        found: false,
+        pageNum: null,
+        text: "",
+        method: null,
+      };
+      let resuelveText = "";
       let ocrText = "";
-      let finalSource = "";
-      let usedEmbed = false;
 
-      // PASO 1: Intentar OCR PRIMERO (prioridad)
+      // PASO 1: Buscar RESUELVE en texto embebido (para encontrar página)
       try {
-        ocrText = await ocrPdfWithTesseract(testPdf);
+        const embedInfo = await findResuelveInEmbed(testPdf);
+        if (embedInfo.found && embedInfo.pageNum) {
+          // Encontramos la página con EMBED, ahora hacemos OCR en esa página
+          try {
+            ocrText = await ocrSinglePage(testPdf, embedInfo.pageNum);
+            resuelveInfo = {
+              found: true,
+              pageNum: embedInfo.pageNum,
+              text: ocrText,
+              method: "ocr",
+            };
+            resuelveText = ocrText;
+          } catch {
+            // Si OCR falla, usar el texto embed como fallback
+            resuelveInfo = embedInfo;
+            resuelveText = embedInfo.text;
+          }
+        }
       } catch {
-        ocrText = "";
+        // Continuar con búsqueda OCR completa
       }
 
-      // PASO 2: Extraer datos del OCR
-      const ocrData = extractUserId(ocrText);
-      const finalData = { ...ocrData };
-
-      // PASO 3: Si OCR no encontró todo, usar EMBED como refuerzo
-      if (!ocrData.Usuario || !ocrData.Identificacion) {
+      // PASO 2: Si no se encontró en embed, buscar con OCR página por página
+      if (!resuelveInfo.found || !hasAFavorPattern(resuelveText)) {
         try {
-          embedText = await extractTextFromPdf(testPdf);
-          const embedData = extractUserId(embedText);
-
-          // Usar EMBED solo para completar lo que falta
-          if (!finalData.Usuario && embedData.Usuario) {
-            finalData.Usuario = embedData.Usuario;
-            usedEmbed = true;
-          }
-          if (!finalData.Identificacion && embedData.Identificacion) {
-            finalData.Identificacion = embedData.Identificacion;
-            usedEmbed = true;
+          const ocrResuelve = await findResuelveWithOcr(testPdf);
+          if (ocrResuelve.found) {
+            resuelveInfo = ocrResuelve;
+            ocrText = ocrResuelve.text;
+            resuelveText = ocrText;
           }
         } catch {
-          embedText = "";
+          // Continuar
         }
       }
 
-      // Determinar fuente final
-      if (finalData.Usuario || finalData.Identificacion) {
-        if (usedEmbed && ocrText) {
-          finalSource = "OCR+EMBED";
-        } else if (usedEmbed) {
-          finalSource = "EMBED";
-        } else {
-          finalSource = "OCR";
+      // PASO 3: Si no se encontró RESUELVE, fallback a OCR página 1
+      if (!resuelveInfo.found) {
+        try {
+          const fallbackText = await ocrPdfWithTesseract(testPdf, 1);
+          resuelveText = fallbackText;
+        } catch {
+          // Continuar
         }
       }
 
-      // PASO 4: Mostrar resultados
-      const displayText = ocrText || embedText;
-      // Si se usó EMBED, SIEMPRE es warning
-      const needsReview = usedEmbed || finalData.needsReview;
+      // PASO 4: Extraer datos (siempre OCR)
+      const finalData = extractUserId(resuelveText);
+      let finalSource = "OCR";
+      if (resuelveInfo.pageNum) {
+        finalSource += ` (pág ${resuelveInfo.pageNum})`;
+      }
+
+      const needsReview =
+        finalData.needsReview ||
+        finalData.confidence !== "high" ||
+        !resuelveInfo.found;
 
       if (finalData.Usuario && finalData.Identificacion) {
         setTestResult({
           name: finalData.Usuario,
           id: finalData.Identificacion,
-          extractedText: displayText,
+          extractedText: resuelveText,
           needsReview: needsReview,
           source: finalSource,
+          resuelvePage: resuelveInfo.pageNum ?? undefined,
         });
       } else if (finalData.Usuario || finalData.Identificacion) {
-        // PARCIAL - mostrar ambos textos
         const found = finalData.Usuario
           ? `Usuario: ${finalData.Usuario}`
           : `ID: ${finalData.Identificacion}`;
@@ -1084,39 +1335,24 @@ export default function App() {
         setTestResult({
           name: finalData.Usuario,
           id: finalData.Identificacion,
-          error: `PARCIAL: ${found}. Falta: ${missing} [${finalSource || "OCR+EMBED"}]`,
-          ocrText: ocrText || "(OCR no extrajo texto)",
-          embedText: embedText || "(EMBED no extrajo texto)",
+          error: `PARCIAL: ${found}. Falta: ${missing} [${finalSource}]`,
+          extractedText: resuelveText,
           needsReview: true,
-          source: finalSource || "OCR+EMBED",
+          source: finalSource,
+          resuelvePage: resuelveInfo.pageNum ?? undefined,
         });
       } else {
-        // ERROR - mostrar ambos textos
-        const allText = ocrText || embedText;
-        let errorMsg = "No se pudo extraer la información del PDF.";
-        if (!allText || allText.length === 0) {
-          errorMsg = "No se pudo extraer ningún texto del PDF.";
-        } else {
-          const lower = allText.toLowerCase();
-          const hasSenor = /se[ñn]or|senor|snor|sñor|senores/i.test(lower);
-          const hasIdentificado = /identificad/i.test(lower);
-          const hasCedula = /c[eé]dula|cedula/i.test(lower);
-
-          if (!hasSenor && !hasIdentificado) {
-            errorMsg = "No se encontró 'señor/a' ni 'identificado/a'.";
-          } else if (!hasCedula) {
-            errorMsg = "No se encontró 'cédula' en el texto.";
-          } else {
-            errorMsg =
-              "Se encontraron palabras clave pero no el patrón completo.";
-          }
+        let errorMsg = "No se encontró el patrón 'a favor de' + nombre + ID.";
+        if (!resuelveInfo.found) {
+          errorMsg = "No se encontró la sección RESUELVE en ninguna página.";
+        } else if (!hasAFavorPattern(resuelveText)) {
+          errorMsg = `RESUELVE encontrado (pág ${resuelveInfo.pageNum}) pero sin 'a favor de'.`;
         }
-        errorMsg += " (Se probó OCR y EMBED)";
         setTestResult({
           error: errorMsg,
-          ocrText: ocrText || "(OCR no extrajo texto)",
-          embedText: embedText || "(EMBED no extrajo texto)",
-          source: "OCR+EMBED",
+          extractedText: resuelveText,
+          source: finalSource,
+          resuelvePage: resuelveInfo.pageNum ?? undefined,
         });
       }
     } catch (e: unknown) {
@@ -1332,6 +1568,17 @@ export default function App() {
                       {testResult.error}
                     </div>
                   </div>
+                  {testResult.resuelvePage && (
+                    <div className="test-result-item">
+                      <div className="test-result-label">
+                        📍 RESUELVE encontrado
+                      </div>
+                      <div className="test-result-value">
+                        Página {testResult.resuelvePage} (pero sin datos
+                        extraíbles)
+                      </div>
+                    </div>
+                  )}
                   {(testResult.ocrText ||
                     testResult.embedText ||
                     testResult.extractedText) && (
@@ -1404,6 +1651,16 @@ export default function App() {
                         <div className="test-result-label">Fuente</div>
                         <div className="test-result-value">
                           {testResult.source}
+                        </div>
+                      </div>
+                    )}
+                    {testResult.resuelvePage && (
+                      <div className="test-result-item">
+                        <div className="test-result-label">
+                          📍 RESUELVE encontrado
+                        </div>
+                        <div className="test-result-value success">
+                          Página {testResult.resuelvePage}
                         </div>
                       </div>
                     )}

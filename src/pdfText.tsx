@@ -29,9 +29,83 @@ const MULTI_SPACE = /\s{3,}/g;
 const MULTI_NEWLINE = /\n{3,}/g;
 const CARDER_LINE = /^.*C\s*A\s*R\s*D\s*E\s*R.*$/gim;
 
+// Pattern para encontrar sección RESUELVE
+const RESUELVE_PATTERN = /\bRESUELVE\s*:/i;
+const A_FAVOR_DE_PATTERN = /a\s+favor\s+de/i;
+
+export type PageText = {
+  pageNum: number;
+  text: string;
+};
+
+export type ResuelveInfo = {
+  found: boolean;
+  pageNum: number | null;
+  text: string;
+  method: "embed" | "ocr" | null;
+};
+
 /**
- * Extrae texto de un PDF con ordenamiento por posición
- * y filtrado de marcas de agua
+ * Extrae texto de una página específica del PDF
+ */
+async function extractPageText(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  pdf: any,
+  pageNum: number,
+): Promise<string> {
+  const page = await pdf.getPage(pageNum);
+  const content = await page.getTextContent();
+  const viewport = page.getViewport({ scale: 1 });
+  const pageHeight = viewport.height;
+
+  // Extraer items con posición
+  const items: Array<{ str: string; x: number; y: number }> = [];
+
+  for (const item of content.items) {
+    const textItem = item as TextItem;
+    if (!textItem.str || textItem.str.trim() === "") continue;
+
+    const x = textItem.transform[4];
+    const y = pageHeight - textItem.transform[5];
+
+    const text = textItem.str.trim();
+    if (isWatermark(text)) continue;
+
+    items.push({ str: text, x, y });
+  }
+
+  // Ordenar por posición
+  items.sort((a, b) => {
+    const yDiff = a.y - b.y;
+    if (Math.abs(yDiff) < 5) {
+      return a.x - b.x;
+    }
+    return yDiff;
+  });
+
+  // Construir texto
+  let currentY = -1;
+  let lineText = "";
+  let fullText = "";
+
+  for (const item of items) {
+    if (currentY !== -1 && Math.abs(item.y - currentY) > 10) {
+      fullText += lineText.trim() + "\n";
+      lineText = "";
+    }
+    currentY = item.y;
+    lineText += item.str + " ";
+  }
+
+  if (lineText.trim()) {
+    fullText += lineText.trim() + "\n";
+  }
+
+  return cleanExtractedText(fullText.trim());
+}
+
+/**
+ * Extrae texto de un PDF (mantiene compatibilidad)
  */
 export async function extractTextFromPdf(
   file: File,
@@ -45,60 +119,97 @@ export async function extractTextFromPdf(
   const pagesToProcess = Math.min(maxPages, pdf.numPages);
 
   for (let i = 1; i <= pagesToProcess; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    const viewport = page.getViewport({ scale: 1 });
-    const pageHeight = viewport.height;
+    const pageText = await extractPageText(pdf, i);
+    fullText += pageText + "\n";
+  }
 
-    // Extraer items con posición
-    const items: Array<{ str: string; x: number; y: number }> = [];
+  return fullText.trim();
+}
 
-    for (const item of content.items) {
-      const textItem = item as TextItem;
-      if (!textItem.str || textItem.str.trim() === "") continue;
+/**
+ * Extrae texto de TODAS las páginas del PDF
+ * Retorna array con texto de cada página
+ */
+export async function extractAllPagesText(file: File): Promise<PageText[]> {
+  const pdfjsLib = await getPdfjsLib();
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
 
-      // transform[4] = x, transform[5] = y
-      const x = textItem.transform[4];
-      const y = pageHeight - textItem.transform[5]; // Invertir Y (PDF usa coordenadas desde abajo)
+  const pages: PageText[] = [];
 
-      // Filtrar marcas de agua comunes
-      const text = textItem.str.trim();
-      if (isWatermark(text)) continue;
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const text = await extractPageText(pdf, i);
+    pages.push({ pageNum: i, text });
+  }
 
-      items.push({ str: text, x, y });
-    }
+  return pages;
+}
 
-    // Ordenar por posición: primero por Y (arriba→abajo), luego por X (izquierda→derecha)
-    items.sort((a, b) => {
-      const yDiff = a.y - b.y;
-      // Si están en la misma línea (diferencia < 5px), ordenar por X
-      if (Math.abs(yDiff) < 5) {
-        return a.x - b.x;
-      }
-      return yDiff;
-    });
+/**
+ * Extrae texto de una página específica
+ */
+export async function extractSinglePageText(
+  file: File,
+  pageNum: number,
+): Promise<string> {
+  const pdfjsLib = await getPdfjsLib();
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
 
-    // Construir texto línea por línea
-    let currentY = -1;
-    let lineText = "";
+  if (pageNum < 1 || pageNum > pdf.numPages) {
+    return "";
+  }
 
-    for (const item of items) {
-      // Nueva línea si la diferencia en Y es > 10px
-      if (currentY !== -1 && Math.abs(item.y - currentY) > 10) {
-        fullText += lineText.trim() + "\n";
-        lineText = "";
-      }
-      currentY = item.y;
-      lineText += item.str + " ";
-    }
+  return extractPageText(pdf, pageNum);
+}
 
-    // Agregar última línea
-    if (lineText.trim()) {
-      fullText += lineText.trim() + "\n";
+/**
+ * Obtiene el número total de páginas del PDF
+ */
+export async function getPdfPageCount(file: File): Promise<number> {
+  const pdfjsLib = await getPdfjsLib();
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  return pdf.numPages;
+}
+
+/**
+ * Busca la sección RESUELVE en el texto embebido de todas las páginas
+ * Retorna la página donde se encontró y el texto de esa página
+ */
+export async function findResuelveInEmbed(file: File): Promise<ResuelveInfo> {
+  const pages = await extractAllPagesText(file);
+
+  for (const page of pages) {
+    // Buscar RESUELVE: y luego "a favor de"
+    if (RESUELVE_PATTERN.test(page.text) && A_FAVOR_DE_PATTERN.test(page.text)) {
+      return {
+        found: true,
+        pageNum: page.pageNum,
+        text: page.text,
+        method: "embed",
+      };
     }
   }
 
-  return cleanExtractedText(fullText.trim());
+  // Si no encontramos ambos patrones, buscar solo RESUELVE
+  for (const page of pages) {
+    if (RESUELVE_PATTERN.test(page.text)) {
+      return {
+        found: true,
+        pageNum: page.pageNum,
+        text: page.text,
+        method: "embed",
+      };
+    }
+  }
+
+  return {
+    found: false,
+    pageNum: null,
+    text: "",
+    method: null,
+  };
 }
 
 /**
@@ -111,7 +222,6 @@ function isWatermark(text: string): boolean {
     if (pattern.test(upper)) return true;
   }
 
-  // Si es solo "CARDER" repetido o fragmentos
   if (upper.replace(/\s/g, "") === "CARDER") return true;
 
   return false;

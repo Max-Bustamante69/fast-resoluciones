@@ -1,5 +1,6 @@
 // ocr.ts - OCR optimizado con filtrado de marcas de agua
 import Tesseract from "tesseract.js";
+import type { ResuelveInfo } from "./pdfText";
 
 // Worker reutilizable (singleton)
 let workerInstance: Tesseract.Worker | null = null;
@@ -31,7 +32,6 @@ async function getWorker(): Promise<Tesseract.Worker> {
   workerInstance = worker;
   workerInitializing = false;
 
-  // Resolver todos los que estaban esperando
   while (workerQueue.length > 0) {
     const resolve = workerQueue.shift()!;
     resolve(worker);
@@ -40,7 +40,7 @@ async function getWorker(): Promise<Tesseract.Worker> {
   return worker;
 }
 
-// Pre-compiled regex for text cleaning (optimization)
+// Pre-compiled regex
 const CARDER_LINE = /^.*C\s*A\s*R\s*D\s*E\s*R.*$/gim;
 const CARDER_WORD = /\bCARDER\b/gi;
 const CARDER_SPACED = /\bCA\s*RD\s*ER\b/gi;
@@ -48,10 +48,10 @@ const OCR_NOISE = /[|¡¿]/g;
 const MULTI_SPACE = /\s{3,}/g;
 const MULTI_NEWLINE = /\n{3,}/g;
 
-/**
- * Preprocesamiento de imagen optimizado para eliminar marcas de agua
- * Usa TypedArray para mejor rendimiento
- */
+// Pattern para encontrar sección RESUELVE
+const RESUELVE_PATTERN = /\bRESUELVE\s*:/i;
+const A_FAVOR_DE_PATTERN = /a\s+favor\s+de/i;
+
 function preprocessImage(canvas: HTMLCanvasElement): void {
   const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
   const { width, height } = canvas;
@@ -59,26 +59,17 @@ function preprocessImage(canvas: HTMLCanvasElement): void {
   const data = imageData.data;
   const len = data.length;
 
-  // Procesar en un solo loop optimizado
   for (let i = 0; i < len; i += 4) {
-    // Grayscale usando enteros (más rápido que floats)
     const gray = (data[i] * 77 + data[i + 1] * 150 + data[i + 2] * 29) >> 8;
-
-    // Binarización con umbrales optimizados
     const val = gray > 170 ? 255 : gray < 90 ? 0 : gray > 130 ? 255 : 0;
-
     data[i] = val;
     data[i + 1] = val;
     data[i + 2] = val;
-    // Alpha (data[i + 3]) se mantiene
   }
 
   ctx.putImageData(imageData, 0, 0);
 }
 
-/**
- * Limpia el texto OCR de fragmentos de marca de agua
- */
 function cleanOcrText(text: string): string {
   return text
     .replace(CARDER_LINE, "")
@@ -93,18 +84,7 @@ function cleanOcrText(text: string): string {
 // Caché para el módulo pdfjs
 let pdfjsModule: typeof import("pdfjs-dist") | null = null;
 
-/**
- * OCR de PDF optimizado
- * - Worker reutilizable
- * - Scale 2.5 (balance velocidad/calidad)
- * - JPEG para menor tamaño de datos
- * - Preprocessing inline
- */
-export async function ocrPdfWithTesseract(
-  file: File,
-  maxPages: number = 1,
-): Promise<string> {
-  // Cargar pdfjs una sola vez
+async function getPdfjsModule() {
   if (!pdfjsModule) {
     pdfjsModule = await import("pdfjs-dist");
     pdfjsModule.GlobalWorkerOptions.workerSrc = new URL(
@@ -112,8 +92,59 @@ export async function ocrPdfWithTesseract(
       import.meta.url,
     ).toString();
   }
+  return pdfjsModule;
+}
 
-  const pdf = await pdfjsModule.getDocument({ data: await file.arrayBuffer() })
+/**
+ * OCR de una página específica del PDF
+ */
+export async function ocrSinglePage(
+  file: File,
+  pageNum: number,
+): Promise<string> {
+  const pdfjs = await getPdfjsModule();
+  const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() })
+    .promise;
+
+  if (pageNum < 1 || pageNum > pdf.numPages) {
+    return "";
+  }
+
+  const worker = await getWorker();
+  const page = await pdf.getPage(pageNum);
+
+  const viewport = page.getViewport({ scale: 2.5 });
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+
+  ctx.fillStyle = "white";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await page.render({ canvasContext: ctx, viewport } as any).promise;
+
+  preprocessImage(canvas);
+
+  const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+  const { data } = await worker.recognize(dataUrl);
+
+  canvas.width = 0;
+  canvas.height = 0;
+
+  return cleanOcrText(data.text);
+}
+
+/**
+ * OCR de PDF (mantiene compatibilidad)
+ */
+export async function ocrPdfWithTesseract(
+  file: File,
+  maxPages: number = 1,
+): Promise<string> {
+  const pdfjs = await getPdfjsModule();
+  const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() })
     .promise;
 
   const worker = await getWorker();
@@ -124,35 +155,145 @@ export async function ocrPdfWithTesseract(
   for (let i = 1; i <= pagesToProcess; i++) {
     const page = await pdf.getPage(i);
 
-    // Scale 2.5 - buen balance velocidad/calidad
     const viewport = page.getViewport({ scale: 2.5 });
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
     canvas.width = viewport.width;
     canvas.height = viewport.height;
 
-    // Fondo blanco
     ctx.fillStyle = "white";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Renderizar PDF
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await page.render({ canvasContext: ctx, viewport } as any).promise;
 
-    // Preprocesar para eliminar marca de agua (inline para evitar crear nuevo canvas)
     preprocessImage(canvas);
 
-    // OCR - usar JPEG para menor tamaño (más rápido transfer al worker)
     const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
     const { data } = await worker.recognize(dataUrl);
     text += data.text + "\n";
 
-    // Limpiar memoria inmediatamente
     canvas.width = 0;
     canvas.height = 0;
   }
 
   return cleanOcrText(text);
+}
+
+/**
+ * Busca la sección RESUELVE usando OCR, página por página
+ * Retorna información sobre dónde se encontró
+ */
+export async function findResuelveWithOcr(file: File): Promise<ResuelveInfo> {
+  const pdfjs = await getPdfjsModule();
+  const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() })
+    .promise;
+
+  const worker = await getWorker();
+
+  // Buscar desde la página 1 hasta encontrar RESUELVE
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+
+    const viewport = page.getViewport({ scale: 2.5 });
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await page.render({ canvasContext: ctx, viewport } as any).promise;
+
+    preprocessImage(canvas);
+
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+    const { data } = await worker.recognize(dataUrl);
+    const text = cleanOcrText(data.text);
+
+    canvas.width = 0;
+    canvas.height = 0;
+
+    // Verificar si esta página tiene RESUELVE y "a favor de"
+    if (RESUELVE_PATTERN.test(text) && A_FAVOR_DE_PATTERN.test(text)) {
+      return {
+        found: true,
+        pageNum: i,
+        text: text,
+        method: "ocr",
+      };
+    }
+
+    // Si solo tiene RESUELVE, guardar pero seguir buscando
+    if (RESUELVE_PATTERN.test(text)) {
+      // Podría ser que "a favor de" esté en la siguiente página
+      // Hacer OCR de la siguiente página también
+      if (i < pdf.numPages) {
+        const nextPage = await pdf.getPage(i + 1);
+        const nextViewport = nextPage.getViewport({ scale: 2.5 });
+        const nextCanvas = document.createElement("canvas");
+        const nextCtx = nextCanvas.getContext("2d", {
+          willReadFrequently: true,
+        })!;
+        nextCanvas.width = nextViewport.width;
+        nextCanvas.height = nextViewport.height;
+
+        nextCtx.fillStyle = "white";
+        nextCtx.fillRect(0, 0, nextCanvas.width, nextCanvas.height);
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await nextPage.render({ canvasContext: nextCtx, viewport: nextViewport } as any).promise;
+
+        preprocessImage(nextCanvas);
+
+        const nextDataUrl = nextCanvas.toDataURL("image/jpeg", 0.92);
+        const nextResult = await worker.recognize(nextDataUrl);
+        const nextText = cleanOcrText(nextResult.data.text);
+
+        nextCanvas.width = 0;
+        nextCanvas.height = 0;
+
+        // Combinar texto de ambas páginas
+        const combinedText = text + "\n" + nextText;
+
+        if (A_FAVOR_DE_PATTERN.test(combinedText)) {
+          return {
+            found: true,
+            pageNum: i, // Página donde empieza RESUELVE
+            text: combinedText,
+            method: "ocr",
+          };
+        }
+      }
+
+      // Si no encontramos "a favor de", retornar solo con RESUELVE
+      return {
+        found: true,
+        pageNum: i,
+        text: text,
+        method: "ocr",
+      };
+    }
+  }
+
+  return {
+    found: false,
+    pageNum: null,
+    text: "",
+    method: null,
+  };
+}
+
+/**
+ * Obtiene el número total de páginas del PDF
+ */
+export async function getOcrPdfPageCount(file: File): Promise<number> {
+  const pdfjs = await getPdfjsModule();
+  const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() })
+    .promise;
+  return pdf.numPages;
 }
 
 // Limpiar worker al cerrar la página
